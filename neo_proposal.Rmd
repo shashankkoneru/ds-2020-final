@@ -46,9 +46,9 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 
-# Load API key from environment variable (set in .Renviron as NASA_KEY=your_key)
-api_key <- Sys.getenv("NASA_KEY")
-# api_key <- "DEMO_KEY"
+# Load API key from environment variable (set in .Renviron as NASA_KEY=your_key), use "DEMO_KEY" if you have none.
+# api_key <- Sys.getenv("NASA_KEY")
+api_key <- "DEMO_KEY"
 
 # Function to pull one week of NEO data from the API
 fetch_neo_week <- function(start_date, end_date, key) {
