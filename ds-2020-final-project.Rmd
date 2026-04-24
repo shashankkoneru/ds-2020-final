@@ -9,22 +9,108 @@ date: "2026-04-24"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Data Description
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+We are working with a dataset of **42,919 Near-Earth Objects (NEOs)** sourced from NASA's
+NeoWs (Near Earth Object Web Service) API. Each row represents one NEO and includes physical
+characteristics (estimated diameter, absolute magnitude), orbital properties (eccentricity,
+inclination, semi-major axis), close approach data (miss distance, relative velocity), and
+a binary classification of whether NASA considers it potentially hazardous.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+Our goal is to identify which features best predict hazard classification and build a model
+that can accurately classify NEOs as hazardous or non-hazardous.
 
-```{r cars}
-summary(cars)
+---
+
+## Data Ingestion
+
+We load the dataset directly from the `.xlsx` file using the `readxl` package. No API calls
+are needed at this stage since the data has already been collected and saved locally.
+
+```{r load-data}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+neo_raw <- read_excel("~/dev/school/ds-2020-final/neo_full_dataset.xlsx")
+
+# Quick look at dimensions and structure
+dim(neo_raw)
+glimpse(neo_raw)
 ```
 
-## Including Plots
+---
 
-You can also embed plots, for example:
+## Data Cleaning
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+### Step 1: Check for Missing Values
+
+Before cleaning, we get a full picture of where data is missing. This tells us which
+variables have gaps and helps us decide whether to drop or keep those rows.
+
+```{r missing-values}
+colSums(is.na(neo_raw))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Two groups of missing values stand out:
+
+- **1,762 rows** are missing both `miss_distance_km` and `relative_velocity_km_s`. These are
+  two of our most important predictor variables, so rows missing both cannot contribute
+  meaningfully to modeling and will be removed.
+- A small number of rows (4–13) are missing diameter and orbital columns. These will also
+  be dropped since imputing physical measurements for asteroids is not reliable.
+
+```{r drop-missing}
+neo_clean <- neo_raw %>%
+  drop_na()
+
+# Confirm no remaining missing values
+colSums(is.na(neo_clean))
+nrow(neo_clean)
+```
+
+### Step 2: Engineer a Mean Diameter Variable
+
+The dataset provides minimum and maximum estimated diameter in kilometers. Rather than
+keeping both separately, we engineer a single `diam_avg_km` column as the midpoint
+between the two estimates. This gives us one clean numeric predictor representing size.
+
+```{r engineer-diameter}
+neo_clean <- neo_clean %>%
+  mutate(diam_avg_km = (est_diam_min_km + est_diam_max_km) / 2)
+```
+
+### Step 3: Convert the Target Variable to a Factor
+
+The `is_potentially_hazardous_asteroid` column is currently stored as a logical (`TRUE`/`FALSE`).
+For modeling and plotting in R, it is better practice to convert this to a **factor** with
+meaningful labels. This also makes the variable behave correctly in `ggplot2` legends and
+in classification models.
+
+```{r factor-target}
+neo_clean <- neo_clean %>%
+  mutate(hazardous = factor(
+    is_potentially_hazardous_asteroid,
+    levels = c(FALSE, TRUE),
+    labels = c("Not Hazardous", "Hazardous")
+  )) %>%
+  select(-is_potentially_hazardous_asteroid)  # remove original logical column
+```
+
+### Step 4: Check for Duplicate Records
+
+We verify there are no duplicate NEO IDs in the dataset. Duplicates could inflate model
+performance by leaking the same object into both training and test sets.
+
+```{r duplicates}
+sum(duplicated(neo_clean$neo_reference_id))
+```
+
+No duplicates found. Each row represents a unique NEO.
+
+### Step 5: Final Cleaned Dataset
+
+```{r final-clean}
+glimpse(neo_clean)
+```
