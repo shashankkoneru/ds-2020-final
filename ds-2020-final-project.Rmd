@@ -33,7 +33,7 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 
-neo_raw <- read_excel("~/dev/school/ds-2020-final/neo_full_dataset.xlsx")
+neo_raw <- read_excel("neo_full_dataset.xlsx")
 
 # Quick look at dimensions and structure
 dim(neo_raw)
@@ -113,4 +113,146 @@ No duplicates found. Each row represents a unique NEO.
 
 ```{r final-clean}
 glimpse(neo_clean)
+```
+
+---
+
+## Visualizations
+
+### Class Balance
+
+```{r class-balance}
+neo_clean %>%
+  count(hazardous) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = hazardous, y = n, fill = hazardous)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(prop, accuracy = 0.1)), vjust = -0.4) +
+  labs(
+    title = "Class Distribution of Hazardous Label",
+    x = NULL,
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+### Distributions by Hazard Class
+
+```{r distributions-by-class}
+plot_df <- neo_clean %>%
+  select(hazardous, diam_avg_km, relative_velocity_km_s, miss_distance_km) %>%
+  pivot_longer(
+    cols = c(diam_avg_km, relative_velocity_km_s, miss_distance_km),
+    names_to = "feature",
+    values_to = "value"
+  ) %>%
+  mutate(
+    feature = recode(
+      feature,
+      diam_avg_km = "Average Diameter (km)",
+      relative_velocity_km_s = "Relative Velocity (km/s)",
+      miss_distance_km = "Miss Distance (km)"
+    )
+  )
+
+ggplot(plot_df, aes(x = value, fill = hazardous, color = hazardous)) +
+  geom_density(alpha = 0.25, linewidth = 0.8) +
+  facet_wrap(~ feature, scales = "free_x", ncol = 1) +
+  scale_x_log10(labels = scales::label_number()) +
+  labs(
+    title = "Feature Distributions by Hazard Class (Log X Scale)",
+    x = NULL,
+    y = "Density",
+    fill = "Class",
+    color = "Class"
+  ) +
+  theme_minimal()
+```
+
+### Relative Velocity vs. Miss Distance
+
+```{r velocity-vs-miss}
+ggplot(
+  neo_clean,
+  aes(x = relative_velocity_km_s, y = miss_distance_km, color = hazardous)
+) +
+  geom_point(alpha = 0.45, size = 1.6) +
+  scale_y_log10(labels = scales::label_number()) +
+  labs(
+    title = "Relative Velocity vs. Miss Distance",
+    x = "Relative Velocity (km/s)",
+    y = "Miss Distance (km, log scale)",
+    color = "Class"
+  ) +
+  theme_minimal()
+```
+
+### Correlation Heatmap (Numeric Predictors)
+
+```{r correlation-heatmap}
+cor_df <- neo_clean %>%
+  select(
+    absolute_magnitude_h,
+    est_diam_min_km,
+    est_diam_max_km,
+    diam_avg_km,
+    miss_distance_km,
+    relative_velocity_km_s,
+    orbital_eccentricity,
+    orbital_inclination,
+    orbital_semi_major_axis
+  )
+
+cor_mat <- cor(cor_df, use = "complete.obs")
+
+cor_long <- as.data.frame(as.table(cor_mat)) %>%
+  rename(var1 = Var1, var2 = Var2, correlation = Freq)
+
+ggplot(cor_long, aes(x = var1, y = var2, fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  labs(
+    title = "Correlation Heatmap of Numeric Predictors",
+    x = NULL,
+    y = NULL,
+    fill = "r"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Variable Importance (Classification Tree)
+
+```{r variable-importance}
+library(rpart)
+
+tree_fit <- rpart(
+  hazardous ~ diam_avg_km + relative_velocity_km_s + miss_distance_km +
+    absolute_magnitude_h + orbital_eccentricity + orbital_inclination +
+    orbital_semi_major_axis,
+  data = neo_clean,
+  method = "class"
+)
+
+importance_df <- tibble(
+  variable = names(tree_fit$variable.importance),
+  importance = as.numeric(tree_fit$variable.importance)
+) %>%
+  arrange(desc(importance))
+
+ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "#1B9E77") +
+  coord_flip() +
+  labs(
+    title = "Variable Importance from Classification Tree",
+    x = NULL,
+    y = "Importance"
+  ) +
+  theme_minimal()
 ```
