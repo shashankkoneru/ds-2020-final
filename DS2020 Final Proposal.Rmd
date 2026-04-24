@@ -16,68 +16,106 @@ This is an R Markdown document. Markdown is a simple formatting syntax for autho
 When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
 
+
 ```{r}
-# Function to pull one page
+# Load packages
+library(httr)
+library(jsonlite)
+library(tidyverse)
+library(rlang)
+#install.packages("openxlsx")
+library(openxlsx)   # for Excel export
+
+# Your API key
+api_key <- "Ki8M5hjyUxGEPrU2OwWXqUK9pYvDuE9m42ujQ9dt"
+
+# Max allowed by NASA API
+page_size <- 20  
+
+# -------------------------------
+# STEP 1: Get total number of pages
+# -------------------------------
+url_total <- paste0(
+  "https://api.nasa.gov/neo/rest/v1/neo/browse?",
+  "api_key=", api_key,
+  "&page=0&size=1"
+)
+
+res_total <- GET(url_total)
+
+if (res_total$status_code != 200) {
+  stop("Failed to get total pages")
+}
+
+data_total <- fromJSON(rawToChar(res_total$content), simplifyDataFrame = FALSE)
+total_pages <- data_total$page$total_pages
+
+cat("Total pages:", total_pages, "\n")
+
+# -------------------------------
+# STEP 2: Function to pull one page
+# -------------------------------
 get_neo_page <- function(page_num) {
+  
   url <- paste0(
     "https://api.nasa.gov/neo/rest/v1/neo/browse?",
     "api_key=", api_key,
     "&page=", page_num,
     "&size=", page_size
   )
-
+  
   res <- GET(url)
-
+  
   if (res$status_code != 200) {
-    warning("Request failed for page ", page_num)
+    warning("Failed page ", page_num)
     return(tibble())
   }
-
+  
   data <- fromJSON(rawToChar(res$content), simplifyDataFrame = FALSE)
   neo_list <- data$near_earth_objects
-
+  
   if (length(neo_list) == 0) return(tibble())
-
+  
   tibble(
     neo_reference_id = map_chr(neo_list, ~ .x$neo_reference_id %||% NA_character_),
     name = map_chr(neo_list, ~ .x$name %||% NA_character_),
     absolute_magnitude_h = map_dbl(neo_list, ~ .x$absolute_magnitude_h %||% NA_real_),
-
+    
     est_diam_min_km = map_dbl(
       neo_list,
       ~ .x$estimated_diameter$kilometers$estimated_diameter_min %||% NA_real_
     ),
-
+    
     est_diam_max_km = map_dbl(
       neo_list,
       ~ .x$estimated_diameter$kilometers$estimated_diameter_max %||% NA_real_
     ),
-
+    
     miss_distance_km = map_dbl(neo_list, function(x) {
       if (length(x$close_approach_data) == 0) return(NA_real_)
       as.numeric(x$close_approach_data[[1]]$miss_distance$kilometers)
     }),
-
+    
     relative_velocity_km_s = map_dbl(neo_list, function(x) {
       if (length(x$close_approach_data) == 0) return(NA_real_)
       as.numeric(x$close_approach_data[[1]]$relative_velocity$kilometers_per_second)
     }),
-
+    
     orbital_eccentricity = map_dbl(
       neo_list,
       ~ as.numeric(.x$orbital_data$eccentricity %||% NA_real_)
     ),
-
+    
     orbital_inclination = map_dbl(
       neo_list,
       ~ as.numeric(.x$orbital_data$inclination %||% NA_real_)
     ),
-
+    
     orbital_semi_major_axis = map_dbl(
       neo_list,
       ~ as.numeric(.x$orbital_data$semi_major_axis %||% NA_real_)
     ),
-
+    
     is_potentially_hazardous_asteroid = map_lgl(
       neo_list,
       ~ .x$is_potentially_hazardous_asteroid %||% FALSE
@@ -85,23 +123,24 @@ get_neo_page <- function(page_num) {
   )
 }
 
-# Pull ONE page first to test
-all_neo <- get_neo_page(0)
-
-# Show dataset
-glimpse(all_neo)
-View(all_neo)
-
-write_csv(all_neo, "neo_full_dataset.csv")
-
-
-# Pull ALL pages and merge into one dataset
-all_neo <- map_df(seq(0, total_pages - 1), function(i) {
+# -------------------------------
+# STEP 3: Pull ALL pages
+# -------------------------------
+all_neo <- map_df(0:(total_pages - 1), function(i) {
   cat("Pulling page", i + 1, "of", total_pages, "\n")
-  Sys.sleep(1)  # avoid API rate limits
+  Sys.sleep(0.2)  # avoid rate limits
   get_neo_page(i)
 })
 
+# -------------------------------
+# STEP 4: Inspect
+# -------------------------------
 glimpse(all_neo)
-View(all_neo)
+
+# -------------------------------
+# STEP 5: Export to Excel
+# -------------------------------
+write.xlsx(all_neo, "neo_full_dataset.xlsx")
+
+cat("✅ Export complete: neo_full_dataset.xlsx\n")
 ```
