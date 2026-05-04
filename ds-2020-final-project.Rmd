@@ -1,173 +1,299 @@
 ---
-title: "ds-2020-final-project"
+title: "Exploring NASA Potentially Hazardous Asteroid Classifications"
 author: "Ryan Horsey, Scott Engstrom, Pablo Leguizamo, Shashank Koneru"
-output: html_document
-date: "2026-04-24"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document:
+    code_folding: hide
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
 
-## Data Description
+## Introduction
 
-We are working with a dataset of **42,919 Near-Earth Objects (NEOs)** sourced from NASA's
-NeoWs (Near Earth Object Web Service) API. Each row represents one NEO and includes physical
-characteristics (estimated diameter, absolute magnitude), orbital properties (eccentricity,
-inclination, semi-major axis), close approach data (miss distance, relative velocity), and
-a binary classification of whether NASA considers it potentially hazardous.
+Near-Earth Objects (NEOs) are asteroids and comets whose orbits bring them near Earth's
+orbit. NASA classifies some near-Earth asteroids as Potentially Hazardous Asteroids
+(PHAs), meaning their size and orbital path make them worth continued monitoring. The
+label sounds alarming, but it does not mean an asteroid is expected to hit Earth. It
+means the object is large enough and close enough to deserve attention.
 
-Our goal is to identify which features best predict hazard classification and build a model
-that can accurately classify NEOs as hazardous or non-hazardous.
+This project explores which physical, orbital, and close-approach measurements separate
+asteroids NASA labels as hazardous from those it does not. We use data wrangling and
+visualization as the main tools, then use one classification tree as a simple check on
+which variables are most useful for reproducing NASA's label.
 
----
+A key skepticism point is that NASA's PHA definition is partly based on absolute
+magnitude, which is related to asteroid size. We therefore compare a full feature set to
+a skeptical feature set that removes size and brightness. This gives the report a clear
+roadmap: describe the data, explore the main variable patterns, test whether the same
+patterns appear in a simple model, and explain the limits of the findings.
 
-## Data Ingestion
+## Data
 
-We load the dataset directly from the `.xlsx` file using the `readxl` package. No API calls
-are needed at this stage since the data has already been collected and saved locally.
+The primary dataset is `neo_full_dataset.xlsx`, a local object-level dataset with one
+row per asteroid. We use this file instead of `neo.csv` because `neo.csv` is event-like:
+it contains repeated asteroid IDs from multiple close approaches. Using repeated object
+rows without grouped splitting could leak the same asteroid into both training and test
+sets.
 
-```{r load-data}
+```{r libraries, echo=TRUE}
 library(readxl)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-
-neo_raw <- read_excel("neo_full_dataset.xlsx")
-
-# Quick look at dimensions and structure
-dim(neo_raw)
-glimpse(neo_raw)
+library(rpart)
+library(knitr)
 ```
 
----
+```{r display-settings}
+class_colors <- c(
+  "Not Hazardous" = "#4E79A7",
+  "Hazardous" = "#E15759"
+)
 
-## Data Cleaning
+accent_color <- "#59A14F"
+neutral_color <- "#BAB0AC"
 
-### Step 1: Check for Missing Values
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+)
 
-Before cleaning, we get a full picture of where data is missing. This tells us which
-variables have gaps and helps us decide whether to drop or keep those rows.
+feature_labels <- c(
+  absolute_magnitude_h = "Absolute Magnitude H",
+  diam_avg_km = "Average Diameter (km)",
+  miss_distance_km = "Miss Distance (km)",
+  relative_velocity_km_s = "Relative Velocity (km/s)",
+  orbital_eccentricity = "Orbital Eccentricity",
+  orbital_inclination = "Orbital Inclination",
+  orbital_semi_major_axis = "Orbital Semi-Major Axis"
+)
+
+format_percent <- function(x, accuracy = 0.1) {
+  scales::percent(x, accuracy = accuracy)
+}
+```
+
+```{r load-data, echo=TRUE}
+data_path <- "neo_full_dataset.xlsx"
+if (!file.exists(data_path)) {
+  data_path <- "ds-2020-final/neo_full_dataset.xlsx"
+}
+
+neo_raw <- read_excel(data_path)
+
+tibble(
+  rows = nrow(neo_raw),
+  columns = ncol(neo_raw)
+) %>%
+  kable(caption = "Raw dataset dimensions")
+```
+
+### Data Dictionary
+
+```{r data-dictionary}
+data_dictionary <- tibble::tribble(
+  ~variable, ~source, ~unit, ~role, ~notes,
+  "neo_reference_id", "NASA NeoWs/SBDB extraction", "none", "Identifier", "Used only for duplicate checks, not modeling.",
+  "name", "NASA NeoWs/SBDB extraction", "none", "Identifier", "Object name; not used for modeling.",
+  "absolute_magnitude_h", "NASA NeoWs/SBDB extraction", "magnitude", "Predictor", "Brightness measure related to asteroid size; definition-adjacent.",
+  "est_diam_min_km", "NASA NeoWs/SBDB extraction", "kilometers", "Raw input", "Lower estimated diameter bound; replaced by average diameter.",
+  "est_diam_max_km", "NASA NeoWs/SBDB extraction", "kilometers", "Raw input", "Upper estimated diameter bound; replaced by average diameter.",
+  "diam_avg_km", "Engineered", "kilometers", "Predictor", "Mean of minimum and maximum estimated diameter.",
+  "miss_distance_km", "NASA NeoWs/SBDB extraction", "kilometers", "Predictor", "Close-approach miss distance; related to closeness but not the same as MOID.",
+  "relative_velocity_km_s", "NASA NeoWs/SBDB extraction", "km/s", "Predictor", "Relative velocity during close approach.",
+  "orbital_eccentricity", "NASA SBDB extraction", "none", "Predictor", "Orbital shape.",
+  "orbital_inclination", "NASA SBDB extraction", "degrees", "Predictor", "Tilt of orbit relative to reference plane.",
+  "orbital_semi_major_axis", "NASA SBDB extraction", "AU", "Predictor", "Average orbital distance scale.",
+  "is_potentially_hazardous_asteroid", "NASA NeoWs/SBDB extraction", "logical", "Target", "Converted to the factor variable hazardous."
+)
+
+data_dictionary %>%
+  kable(caption = "Data dictionary for variables used in the report")
+```
+
+### Missingness and Duplicates
 
 ```{r missing-values}
-colSums(is.na(neo_raw))
+missing_summary <- tibble(
+  variable = names(neo_raw),
+  missing_n = colSums(is.na(neo_raw)),
+  missing_pct = missing_n / nrow(neo_raw)
+)
+
+missing_summary %>%
+  mutate(missing_pct = format_percent(missing_pct)) %>%
+  arrange(desc(missing_n)) %>%
+  kable(caption = "Missing values by variable")
 ```
 
-Two groups of missing values stand out:
+```{r duplicate-check}
+raw_duplicate_ids <- sum(duplicated(neo_raw$neo_reference_id))
+raw_unique_ids <- n_distinct(neo_raw$neo_reference_id)
 
-- **1,762 rows** are missing both `miss_distance_km` and `relative_velocity_km_s`. These are
-  two of our most important predictor variables, so rows missing both cannot contribute
-  meaningfully to modeling and will be removed.
-- A small number of rows (4–13) are missing diameter and orbital columns. These will also
-  be dropped since imputing physical measurements for asteroids is not reliable.
+tibble(
+  rows = nrow(neo_raw),
+  unique_neo_reference_ids = raw_unique_ids,
+  duplicate_neo_reference_ids = raw_duplicate_ids
+) %>%
+  kable(caption = "Duplicate check for the object-level dataset")
+```
 
-```{r drop-missing}
+```{r optional-csv-context}
+csv_path <- "../neo.csv"
+if (!file.exists(csv_path)) {
+  csv_path <- "neo.csv"
+}
+
+csv_context <- if (file.exists(csv_path)) {
+  neo_csv_context <- read.csv(csv_path)
+  tibble(
+    dataset = "neo.csv",
+    rows = nrow(neo_csv_context),
+    unique_ids = n_distinct(neo_csv_context$id),
+    interpretation = "Event-like table with repeated asteroid IDs"
+  )
+} else {
+  tibble(
+    dataset = "neo.csv",
+    rows = NA_integer_,
+    unique_ids = NA_integer_,
+    interpretation = "Optional context file not found during knit"
+  )
+}
+
+csv_context %>%
+  kable(caption = "Why the event-like CSV was not used as the main modeling table")
+```
+
+### Cleaning and Feature Engineering
+
+```{r clean-data, echo=TRUE}
+model_vars_full <- c(
+  "absolute_magnitude_h",
+  "diam_avg_km",
+  "miss_distance_km",
+  "relative_velocity_km_s",
+  "orbital_eccentricity",
+  "orbital_inclination",
+  "orbital_semi_major_axis"
+)
+
+model_vars_skeptical <- c(
+  "miss_distance_km",
+  "relative_velocity_km_s",
+  "orbital_eccentricity",
+  "orbital_inclination",
+  "orbital_semi_major_axis"
+)
+
 neo_clean <- neo_raw %>%
-  drop_na()
+  mutate(
+    diam_avg_km = (est_diam_min_km + est_diam_max_km) / 2,
+    hazardous = factor(
+      is_potentially_hazardous_asteroid,
+      levels = c(FALSE, TRUE),
+      labels = c("Not Hazardous", "Hazardous")
+    )
+  ) %>%
+  select(
+    neo_reference_id,
+    hazardous,
+    all_of(model_vars_full)
+  ) %>%
+  drop_na(all_of(model_vars_full), hazardous)
 
-# Confirm no remaining missing values
-colSums(is.na(neo_clean))
-nrow(neo_clean)
+tibble(
+  raw_rows = nrow(neo_raw),
+  cleaned_rows = nrow(neo_clean),
+  rows_removed = nrow(neo_raw) - nrow(neo_clean),
+  duplicate_ids_after_cleaning = sum(duplicated(neo_clean$neo_reference_id))
+) %>%
+  mutate(
+    rows_removed_pct = format_percent(rows_removed / raw_rows)
+  ) %>%
+  select(raw_rows, cleaned_rows, rows_removed, rows_removed_pct, duplicate_ids_after_cleaning) %>%
+  kable(caption = "Rows retained after cleaning and feature engineering")
 ```
 
-### Step 2: Engineer a Mean Diameter Variable
-
-The dataset provides minimum and maximum estimated diameter in kilometers. Rather than
-keeping both separately, we engineer a single `diam_avg_km` column as the midpoint
-between the two estimates. This gives us one clean numeric predictor representing size.
-
-```{r engineer-diameter}
-neo_clean <- neo_clean %>%
-  mutate(diam_avg_km = (est_diam_min_km + est_diam_max_km) / 2)
-```
-
-### Step 3: Convert the Target Variable to a Factor
-
-The `is_potentially_hazardous_asteroid` column is currently stored as a logical (`TRUE`/`FALSE`).
-For modeling and plotting in R, it is better practice to convert this to a **factor** with
-meaningful labels. This also makes the variable behave correctly in `ggplot2` legends and
-in classification models.
-
-```{r factor-target}
-neo_clean <- neo_clean %>%
-  mutate(hazardous = factor(
-    is_potentially_hazardous_asteroid,
-    levels = c(FALSE, TRUE),
-    labels = c("Not Hazardous", "Hazardous")
-  )) %>%
-  select(-is_potentially_hazardous_asteroid)  # remove original logical column
-```
-
-### Step 4: Check for Duplicate Records
-
-We verify there are no duplicate NEO IDs in the dataset. Duplicates could inflate model
-performance by leaking the same object into both training and test sets.
-
-```{r duplicates}
-sum(duplicated(neo_clean$neo_reference_id))
-```
-
-No duplicates found. Each row represents a unique NEO.
-
-### Step 5: Final Cleaned Dataset
-
-```{r final-clean}
-glimpse(neo_clean)
-```
-
----
-
-## Visualizations
+## Exploratory Analysis
 
 ### Class Balance
 
 ```{r class-balance}
-neo_clean %>%
+class_balance <- neo_clean %>%
   count(hazardous) %>%
-  mutate(prop = n / sum(n)) %>%
-  ggplot(aes(x = hazardous, y = n, fill = hazardous)) +
-  geom_col(width = 0.7, show.legend = FALSE) +
-  geom_text(aes(label = scales::percent(prop, accuracy = 0.1)), vjust = -0.4) +
-  labs(
-    title = "Class Distribution of Hazardous Label",
-    x = NULL,
-    y = "Count"
+  mutate(prop = n / sum(n))
+
+class_balance %>%
+  mutate(prop = format_percent(prop)) %>%
+  kable(caption = "Class balance in the cleaned asteroid dataset")
+
+ggplot(class_balance, aes(x = hazardous, y = n, fill = hazardous)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(
+    aes(label = scales::percent(prop, accuracy = 0.1)),
+    vjust = -0.4
   ) +
-  theme_minimal()
+  labs(
+    title = "Class Balance of NASA Hazardous Label",
+    x = NULL,
+    y = "Asteroid Count"
+  ) +
+  scale_fill_manual(values = class_colors)
 ```
 
-### Distributions by Hazard Class
+The hazardous class is much smaller than the non-hazardous class, so accuracy alone is
+not a reliable evaluation metric. A model can look accurate while missing many hazardous
+objects.
+
+### Feature Distributions by Hazard Class
 
 ```{r distributions-by-class}
-plot_df <- neo_clean %>%
-  select(hazardous, diam_avg_km, relative_velocity_km_s, miss_distance_km) %>%
+distribution_df <- neo_clean %>%
+  select(
+    hazardous,
+    absolute_magnitude_h,
+    diam_avg_km,
+    miss_distance_km,
+    relative_velocity_km_s,
+    orbital_eccentricity,
+    orbital_inclination,
+    orbital_semi_major_axis
+  ) %>%
   pivot_longer(
-    cols = c(diam_avg_km, relative_velocity_km_s, miss_distance_km),
+    cols = -hazardous,
     names_to = "feature",
     values_to = "value"
   ) %>%
   mutate(
-    feature = recode(
-      feature,
-      diam_avg_km = "Average Diameter (km)",
-      relative_velocity_km_s = "Relative Velocity (km/s)",
-      miss_distance_km = "Miss Distance (km)"
-    )
+    feature = recode(feature, !!!feature_labels)
   )
 
-ggplot(plot_df, aes(x = value, fill = hazardous, color = hazardous)) +
-  geom_density(alpha = 0.25, linewidth = 0.8) +
-  facet_wrap(~ feature, scales = "free_x", ncol = 1) +
-  scale_x_log10(labels = scales::label_number()) +
+ggplot(distribution_df, aes(x = value, fill = hazardous, color = hazardous)) +
+  geom_density(alpha = 0.25, linewidth = 0.7) +
+  facet_wrap(~ feature, scales = "free", ncol = 2) +
   labs(
-    title = "Feature Distributions by Hazard Class (Log X Scale)",
+    title = "Predictor Distributions by Hazard Class",
     x = NULL,
     y = "Density",
     fill = "Class",
     color = "Class"
   ) +
-  theme_minimal()
+  scale_fill_manual(values = class_colors) +
+  scale_color_manual(values = class_colors)
 ```
+
+The clearest separation appears in size-related variables: hazardous asteroids tend to
+have lower absolute magnitude values and larger estimated diameters. The orbital and
+close-approach variables show more overlap, which suggests that NASA's label is not
+explained by one simple measurement in this dataset.
 
 ### Relative Velocity vs. Miss Distance
 
@@ -176,44 +302,42 @@ ggplot(
   neo_clean,
   aes(x = relative_velocity_km_s, y = miss_distance_km, color = hazardous)
 ) +
-  geom_point(alpha = 0.45, size = 1.6) +
+  geom_point(alpha = 0.45, size = 1.5) +
   scale_y_log10(labels = scales::label_number()) +
   labs(
-    title = "Relative Velocity vs. Miss Distance",
+    title = "Relative Velocity vs. Close-Approach Miss Distance",
     x = "Relative Velocity (km/s)",
     y = "Miss Distance (km, log scale)",
     color = "Class"
   ) +
-  theme_minimal()
+  scale_color_manual(values = class_colors)
 ```
 
-### Correlation Heatmap (Numeric Predictors)
+This scatter plot shows why the problem is not as simple as "closer asteroids are always
+hazardous." Hazardous and non-hazardous asteroids overlap across much of the velocity and
+miss-distance range.
+
+### Correlation Heatmap
 
 ```{r correlation-heatmap}
 cor_df <- neo_clean %>%
-  select(
-    absolute_magnitude_h,
-    est_diam_min_km,
-    est_diam_max_km,
-    diam_avg_km,
-    miss_distance_km,
-    relative_velocity_km_s,
-    orbital_eccentricity,
-    orbital_inclination,
-    orbital_semi_major_axis
-  )
+  select(all_of(model_vars_full))
 
 cor_mat <- cor(cor_df, use = "complete.obs")
 
 cor_long <- as.data.frame(as.table(cor_mat)) %>%
-  rename(var1 = Var1, var2 = Var2, correlation = Freq)
+  rename(var1 = Var1, var2 = Var2, correlation = Freq) %>%
+  mutate(
+    var1 = recode(as.character(var1), !!!feature_labels),
+    var2 = recode(as.character(var2), !!!feature_labels)
+  )
 
 ggplot(cor_long, aes(x = var1, y = var2, fill = correlation)) +
   geom_tile(color = "white") +
   scale_fill_gradient2(
-    low = "#2166AC",
+    low = class_colors[["Not Hazardous"]],
     mid = "white",
-    high = "#B2182B",
+    high = class_colors[["Hazardous"]],
     midpoint = 0,
     limits = c(-1, 1)
   ) +
@@ -223,36 +347,289 @@ ggplot(cor_long, aes(x = var1, y = var2, fill = correlation)) +
     y = NULL,
     fill = "r"
   ) +
-  theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-### Variable Importance (Classification Tree)
+Average diameter and absolute magnitude are strongly related, which matches the science:
+brighter asteroids are usually larger. This correlation is also part of why we avoid
+treating size and brightness as independent evidence in the skeptical model below.
 
-```{r variable-importance}
-library(rpart)
+### Analysis Decisions and Trials
 
-tree_fit <- rpart(
-  hazardous ~ diam_avg_km + relative_velocity_km_s + miss_distance_km +
-    absolute_magnitude_h + orbital_eccentricity + orbital_inclination +
-    orbital_semi_major_axis,
-  data = neo_clean,
-  method = "class"
+During earlier drafts, we tried a more model-heavy version of the analysis with logistic
+regression, classification trees, ROC curves, and precision-recall curves. Those tools
+did not change the main finding: size and brightness carry much of the signal, while the
+remaining orbital and close-approach variables are weaker by themselves. We therefore
+kept the final report focused on visual exploration and one interpretable classification
+tree. We also chose the object-level Excel file over the event-like CSV because repeated
+asteroid IDs in the CSV could make model evaluation look better than it really is.
+
+## Modeling
+
+We use a classification tree because it is easier to explain than a more mathematical
+model: the tree sorts asteroids by splitting on variables that best separate hazardous
+from non-hazardous labels. The tree is fit twice:
+
+- **Full feature set:** orbital, close-approach, size, and brightness predictors.
+- **Skeptical feature set:** orbital and close-approach predictors only.
+
+The skeptical feature set tests whether the model can still reproduce NASA's label when
+we remove the variables most closely connected to the official PHA definition.
+
+```{r train-test-split, echo=TRUE}
+set.seed(2026)
+
+neo_model <- neo_clean %>%
+  mutate(row_id = row_number())
+
+train_ids <- neo_model %>%
+  group_by(hazardous) %>%
+  slice_sample(prop = 0.80) %>%
+  ungroup() %>%
+  pull(row_id)
+
+train_data <- neo_model %>%
+  filter(row_id %in% train_ids) %>%
+  select(-row_id, -neo_reference_id)
+
+test_data <- neo_model %>%
+  filter(!row_id %in% train_ids) %>%
+  select(-row_id, -neo_reference_id)
+
+tibble(
+  split = c("Train", "Test"),
+  rows = c(nrow(train_data), nrow(test_data)),
+  hazardous_rate = c(
+    mean(train_data$hazardous == "Hazardous"),
+    mean(test_data$hazardous == "Hazardous")
+  )
+) %>%
+  mutate(hazardous_rate = format_percent(hazardous_rate)) %>%
+  kable(caption = "Stratified train/test split")
+```
+
+### Evaluation Functions
+
+We use four confusion-matrix metrics. Accuracy is the percent of all predictions that
+are correct. Recall is the percent of truly hazardous asteroids the model catches.
+Specificity is the percent of non-hazardous asteroids the model correctly leaves alone.
+Precision is the percent of predicted hazardous asteroids that are actually hazardous.
+
+```{r metric-functions, echo=TRUE}
+safe_divide <- function(numerator, denominator) {
+  ifelse(denominator == 0, NA_real_, numerator / denominator)
+}
+
+confusion_metrics <- function(actual, predicted, positive = "Hazardous") {
+  actual <- as.character(actual)
+  predicted <- as.character(predicted)
+  negative <- setdiff(unique(actual), positive)[1]
+
+  tp <- sum(actual == positive & predicted == positive)
+  tn <- sum(actual == negative & predicted == negative)
+  fp <- sum(actual == negative & predicted == positive)
+  fn <- sum(actual == positive & predicted == negative)
+
+  tibble(
+    tp = tp,
+    tn = tn,
+    fp = fp,
+    fn = fn,
+    accuracy = safe_divide(tp + tn, tp + tn + fp + fn),
+    recall = safe_divide(tp, tp + fn),
+    specificity = safe_divide(tn, tn + fp),
+    precision = safe_divide(tp, tp + fp)
+  )
+}
+```
+
+### Fit Classification Trees
+
+```{r fit-models, echo=TRUE}
+full_formula <- as.formula(
+  paste("hazardous ~", paste(model_vars_full, collapse = " + "))
 )
 
-importance_df <- tibble(
-  variable = names(tree_fit$variable.importance),
-  importance = as.numeric(tree_fit$variable.importance)
+skeptical_formula <- as.formula(
+  paste("hazardous ~", paste(model_vars_skeptical, collapse = " + "))
+)
+
+tree_full <- rpart(
+  full_formula,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.001, minbucket = 25)
+)
+
+tree_skeptical <- rpart(
+  skeptical_formula,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.001, minbucket = 25)
+)
+
+tree_full_predicted <- predict(tree_full, newdata = test_data, type = "class")
+tree_skeptical_predicted <- predict(tree_skeptical, newdata = test_data, type = "class")
+```
+
+## Results
+
+### Tree Comparison
+
+```{r model-comparison}
+model_comparison <- bind_rows(
+  confusion_metrics(test_data$hazardous, tree_full_predicted) %>%
+    mutate(feature_set = "Full"),
+  confusion_metrics(test_data$hazardous, tree_skeptical_predicted) %>%
+    mutate(feature_set = "Skeptical")
 ) %>%
+  select(
+    feature_set,
+    accuracy,
+    recall,
+    specificity,
+    precision,
+    tp,
+    tn,
+    fp,
+    fn
+  ) %>%
+  arrange(desc(recall), desc(precision))
+
+model_comparison %>%
+  mutate(
+    across(c(accuracy, recall, specificity, precision), ~ format_percent(.x)),
+    note = if_else(feature_set == first(feature_set), "**Highest recall**", "")
+  ) %>%
+  select(
+    `Feature Set` = feature_set,
+    Accuracy = accuracy,
+    Recall = recall,
+    Specificity = specificity,
+    Precision = precision,
+    `True Positives` = tp,
+    `True Negatives` = tn,
+    `False Positives` = fp,
+    `False Negatives` = fn,
+    Note = note
+  ) %>%
+  kable(caption = "Classification tree performance on the test data", escape = FALSE)
+```
+
+The full tree performs better at identifying hazardous asteroids. The skeptical tree has
+similar overall accuracy, but it catches none of the hazardous objects in the test set.
+This is an important result: without size and brightness, the tree mostly learns to
+predict the majority "Not Hazardous" class.
+
+### Confusion Matrix Heatmap
+
+The heatmap below uses the full classification tree, which has the best recall for
+hazardous asteroids.
+
+```{r confusion-heatmap}
+best_model <- model_comparison %>%
+  slice_max(recall, n = 1, with_ties = FALSE)
+
+best_predicted <- if (best_model$feature_set == "Full") {
+  tree_full_predicted
+} else {
+  tree_skeptical_predicted
+}
+
+confusion_df <- tibble(
+  actual = test_data$hazardous,
+  predicted = best_predicted
+) %>%
+  count(actual, predicted) %>%
+  complete(
+    actual = levels(test_data$hazardous),
+    predicted = levels(best_predicted),
+    fill = list(n = 0)
+  )
+
+ggplot(confusion_df, aes(x = predicted, y = actual, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), color = "white", fontface = "bold") +
+  scale_fill_gradient(low = "#C6DBEF", high = class_colors[["Not Hazardous"]]) +
+  labs(
+    title = paste("Confusion Matrix: Classification Tree -", best_model$feature_set),
+    x = "Predicted Class",
+    y = "Actual Class",
+    fill = "Count"
+  )
+```
+
+The full tree correctly identifies some hazardous asteroids, but it still misses many of
+them. This keeps the result honest: the model helps show which variables matter, but it
+would not be acceptable as a real-world asteroid warning system.
+
+### Classification Tree Variable Importance
+
+```{r variable-importance}
+importance_df <- tibble(
+  variable = names(tree_full$variable.importance),
+  importance = as.numeric(tree_full$variable.importance)
+) %>%
+  mutate(variable = recode(variable, !!!feature_labels)) %>%
   arrange(desc(importance))
 
+importance_df %>%
+  mutate(importance = round(importance, 1)) %>%
+  kable(caption = "Most important variables in the full classification tree")
+
 ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
-  geom_col(fill = "#1B9E77") +
+  geom_col(fill = accent_color) +
   coord_flip() +
   labs(
-    title = "Variable Importance from Classification Tree",
+    title = "Variable Importance from Full Classification Tree",
     x = NULL,
     y = "Importance"
-  ) +
-  theme_minimal()
+  )
 ```
+
+The model's most important variables reinforce the visual findings: size and brightness
+are central to the hazardous label, while the other orbital variables provide additional
+but weaker separation.
+
+## Skepticism and Limitations
+
+The strongest limitation is that the hazardous label is not an independent scientific
+outcome like a future impact. It is NASA's classification, and that classification is
+partly based on variables related to asteroid size and brightness. NASA/JPL CNEOS defines
+PHAs using Earth MOID of 0.05 AU or less and absolute magnitude H of 22.0 or brighter
+([CNEOS NEO Groups](https://cneos.jpl.nasa.gov/about/neo_groups.html)). Absolute
+magnitude is therefore definition-adjacent, and average diameter is closely related to
+the same idea.
+
+The dataset also does not include Earth MOID, the official orbital-distance criterion
+used in the PHA definition. We use `miss_distance_km`, but close-approach miss distance is
+not the same as MOID. This means the model approximates NASA's classification using the
+available object-level variables rather than exactly applying NASA's rule.
+
+Other limitations:
+
+- The hazardous class is imbalanced, so accuracy can be misleading.
+- Rows with missing modeling fields were removed rather than imputed.
+- The close-approach variables appear to summarize one approach field, not the full future
+  distribution of possible close approaches.
+- The models predict NASA's label; they do not estimate causal asteroid danger or actual
+  Earth impact probability.
+
+## Conclusion
+
+The strongest pattern in the data is that NASA's hazardous label is closely tied to
+asteroid size and brightness. Hazardous asteroids are rare in the cleaned dataset, making
+up about 6.6% of observations, and the full classification tree catches more hazardous
+objects than the skeptical tree. When size and brightness are removed, the model mostly
+defaults to predicting the majority non-hazardous class.
+
+The main takeaway is therefore not that we built a danger-prediction system. Instead, we
+showed that NASA's PHA label can be partly reproduced from available asteroid
+measurements, while also showing why that result must be interpreted carefully. The model
+is strongest when it includes variables that are close to NASA's own definition.
+
+Future work should add Earth MOID, the official orbital-distance part of the PHA
+definition, and should compare multiple close approaches for the same asteroid rather
+than relying on one summarized approach field. It would also be useful to separate
+asteroids by size group or orbit type to see whether the same patterns hold within more
+specific asteroid categories.
