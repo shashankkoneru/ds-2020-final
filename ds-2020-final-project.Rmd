@@ -256,3 +256,102 @@ ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
   ) +
   theme_minimal()
 ```
+
+### Orbital Characteristics by Hazard Class
+
+```{r orbital-boxplots}
+neo_clean %>%
+  select(hazardous, orbital_eccentricity, orbital_inclination, orbital_semi_major_axis) %>%
+  # log10 transform semi-major axis before pivoting — raw values extend to 300+ AU
+  # which collapses the box to nothing; log scale reveals the actual distribution
+  mutate(orbital_semi_major_axis = log10(orbital_semi_major_axis)) %>%
+  pivot_longer(
+    cols = c(orbital_eccentricity, orbital_inclination, orbital_semi_major_axis),
+    names_to = "feature",
+    values_to = "value"
+  ) %>%
+  mutate(
+    feature = recode(
+      feature,
+      orbital_eccentricity    = "Orbital Eccentricity",
+      orbital_inclination     = "Orbital Inclination (deg)",
+      orbital_semi_major_axis = "Semi-Major Axis (log10 AU)"
+    )
+  ) %>%
+  ggplot(aes(x = hazardous, y = value, fill = hazardous)) +
+  geom_boxplot(outlier.alpha = 0.15, outlier.size = 0.8) +
+  facet_wrap(~ feature, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Orbital Characteristics by Hazard Classification",
+    x = NULL,
+    y = NULL,
+    fill = "Class"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### Absolute Magnitude by Hazard Class
+
+```{r magnitude-density}
+ggplot(neo_clean, aes(x = absolute_magnitude_h, fill = hazardous, color = hazardous)) +
+  geom_density(alpha = 0.3, linewidth = 0.9) +
+  labs(
+    title = "Distribution of Absolute Magnitude by Hazard Classification",
+    x = "Absolute Magnitude (H)",
+    y = "Density",
+    fill = "Class",
+    color = "Class"
+  ) +
+  theme_minimal()
+```
+
+```{r magnitude-boxplot}
+ggplot(neo_clean, aes(x = hazardous, y = absolute_magnitude_h, fill = hazardous)) +
+  geom_boxplot(outlier.alpha = 0.2, outlier.size = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Absolute Magnitude by Hazard Classification",
+    x = NULL,
+    y = "Absolute Magnitude (H)"
+  ) +
+  theme_minimal()
+```
+
+### Pairwise Scatterplots of Top Predictors
+
+```{r pairwise-scatter}
+var_pairs <- list(
+  list(x = "diam_avg_km",          y = "absolute_magnitude_h"),
+  list(x = "diam_avg_km",          y = "orbital_eccentricity"),
+  list(x = "diam_avg_km",          y = "orbital_inclination"),
+  list(x = "absolute_magnitude_h", y = "orbital_eccentricity"),
+  list(x = "absolute_magnitude_h", y = "orbital_inclination"),
+  list(x = "orbital_eccentricity", y = "orbital_inclination")
+)
+
+pair_df <- bind_rows(lapply(var_pairs, function(p) {
+  neo_clean %>%
+    transmute(
+      hazardous,
+      x_val   = .data[[p$x]],
+      y_val   = .data[[p$y]],
+      panel   = paste(p$x, "vs", p$y)
+    )
+}))
+
+ggplot(pair_df, aes(x = x_val, y = y_val, color = hazardous)) +
+  geom_point(alpha = 0.2, size = 0.6) +
+  facet_wrap(~ panel, scales = "free", ncol = 3) +
+  labs(
+    title = "Pairwise Scatterplots of Top Four Predictors",
+    x = NULL,
+    y = NULL,
+    color = "Class"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text      = element_text(size = 7),
+    axis.text       = element_text(size = 6)
+  )
+```
