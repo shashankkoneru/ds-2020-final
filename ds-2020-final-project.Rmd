@@ -32,6 +32,29 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(rpart)
+library(knitr)
+
+class_colors <- c(
+  "Not Hazardous" = "#4E79A7",
+  "Hazardous" = "#E15759"
+)
+
+accent_color <- "#59A14F"
+
+feature_labels <- c(
+  absolute_magnitude_h = "Absolute Magnitude H",
+  diam_avg_km = "Average Diameter (km)",
+  miss_distance_km = "Miss Distance (km)",
+  relative_velocity_km_s = "Relative Velocity (km/s)",
+  orbital_eccentricity = "Orbital Eccentricity",
+  orbital_inclination = "Orbital Inclination",
+  orbital_semi_major_axis = "Orbital Semi-Major Axis"
+)
+
+format_percent <- function(x, accuracy = 0.1) {
+  scales::percent(x, accuracy = accuracy)
+}
 
 neo_raw <- read_excel("neo_full_dataset.xlsx")
 
@@ -230,8 +253,6 @@ ggplot(cor_long, aes(x = var1, y = var2, fill = correlation)) +
 ### Variable Importance (Classification Tree)
 
 ```{r variable-importance}
-library(rpart)
-
 tree_fit <- rpart(
   hazardous ~ diam_avg_km + relative_velocity_km_s + miss_distance_km +
     absolute_magnitude_h + orbital_eccentricity + orbital_inclination +
@@ -256,6 +277,9 @@ ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
   ) +
   theme_minimal()
 ```
+
+This first tree is an exploratory check rather than the final model evaluation. A proper
+held-out train/test comparison appears after the remaining research-question plots.
 
 ### Orbital Characteristics by Hazard Class
 
@@ -355,3 +379,310 @@ ggplot(pair_df, aes(x = x_val, y = y_val, color = hazardous)) +
     axis.text       = element_text(size = 6)
   )
 ```
+
+### Hazard Rate by Asteroid Size
+
+```{r hazard-rate-by-size}
+size_hazard_summary <- neo_clean %>%
+  mutate(
+    size_group = cut(
+      diam_avg_km,
+      breaks = c(0, 0.03, 0.10, 0.30, 1.00, Inf),
+      labels = c("< 0.03", "0.03-0.10", "0.10-0.30", "0.30-1.00", "1.00+"),
+      right = FALSE
+    )
+  ) %>%
+  group_by(size_group) %>%
+  summarise(
+    n = n(),
+    hazardous_n = sum(hazardous == "Hazardous"),
+    hazard_rate = hazardous_n / n,
+    .groups = "drop"
+  )
+
+size_hazard_summary %>%
+  mutate(hazard_rate = format_percent(hazard_rate)) %>%
+  rename(
+    `Average Diameter Group (km)` = size_group,
+    `Asteroid Count` = n,
+    `Hazardous Count` = hazardous_n,
+    `Percent Hazardous` = hazard_rate
+  ) %>%
+  kable(caption = "Hazard rate by average diameter group")
+
+ggplot(size_hazard_summary, aes(x = size_group, y = hazard_rate)) +
+  geom_col(fill = accent_color, width = 0.7) +
+  geom_text(
+    aes(label = scales::percent(hazard_rate, accuracy = 0.1)),
+    vjust = -0.35,
+    size = 3.4
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(size_hazard_summary$hazard_rate) * 1.15)
+  ) +
+  labs(
+    title = "Hazard Rate by Average Diameter Group",
+    x = "Average Diameter Group (km)",
+    y = "Percent Hazardous"
+  ) +
+  theme_minimal()
+```
+
+The two smallest diameter groups have a 0.0% hazardous rate. The hazardous rate rises
+sharply once average diameter reaches 0.10-0.30 km, peaks in the 0.30-1.00 km group, and
+stays high for asteroids above 1.00 km. This supports the presentation takeaway that
+NASA's hazardous label is strongly connected to asteroid size.
+
+### Diameter and Absolute Magnitude Together
+
+```{r diameter-vs-magnitude}
+magnitude_diameter_corr <- cor(
+  neo_clean$absolute_magnitude_h,
+  neo_clean$diam_avg_km,
+  use = "complete.obs"
+)
+
+tibble(
+  relationship = "Absolute magnitude H vs. average diameter",
+  correlation = round(magnitude_diameter_corr, 3)
+) %>%
+  kable(caption = "Correlation between absolute magnitude and average diameter")
+
+ggplot() +
+  geom_point(
+    data = filter(neo_clean, hazardous == "Not Hazardous"),
+    aes(x = absolute_magnitude_h, y = diam_avg_km, color = hazardous),
+    alpha = 0.12,
+    size = 0.8
+  ) +
+  geom_point(
+    data = filter(neo_clean, hazardous == "Hazardous"),
+    aes(x = absolute_magnitude_h, y = diam_avg_km, color = hazardous),
+    alpha = 0.7,
+    size = 1.1
+  ) +
+  scale_y_log10(labels = scales::label_number()) +
+  scale_color_manual(values = class_colors) +
+  labs(
+    title = "Average Diameter vs. Absolute Magnitude by Hazard Class",
+    x = "Absolute Magnitude H",
+    y = "Average Diameter (km, log scale)",
+    color = "Class"
+  ) +
+  theme_minimal()
+```
+
+Average diameter and absolute magnitude move together very strongly: lower absolute
+magnitude generally means a brighter and larger asteroid. That is why both variables
+show up as important in the analysis. For interpretation, they should be treated as
+overlapping evidence about size rather than as two independent findings.
+
+## Modeling
+
+We use a classification tree because the earlier plots suggest threshold-like behavior:
+very small asteroids are rarely labeled hazardous, while larger objects are much more
+likely to be flagged. To keep the evaluation honest, the data is split into stratified
+training and test sets before fitting the models.
+
+The model uses the main orbital, close-approach, size, and brightness predictors from
+the exploratory analysis.
+
+```{r train-test-split}
+model_vars_full <- c(
+  "absolute_magnitude_h",
+  "diam_avg_km",
+  "miss_distance_km",
+  "relative_velocity_km_s",
+  "orbital_eccentricity",
+  "orbital_inclination",
+  "orbital_semi_major_axis"
+)
+
+set.seed(2026)
+
+neo_model <- neo_clean %>%
+  select(neo_reference_id, hazardous, all_of(model_vars_full)) %>%
+  mutate(row_id = row_number())
+
+train_ids <- neo_model %>%
+  group_by(hazardous) %>%
+  slice_sample(prop = 0.80) %>%
+  ungroup() %>%
+  pull(row_id)
+
+train_data <- neo_model %>%
+  filter(row_id %in% train_ids) %>%
+  select(-row_id, -neo_reference_id)
+
+test_data <- neo_model %>%
+  filter(!row_id %in% train_ids) %>%
+  select(-row_id, -neo_reference_id)
+
+tibble(
+  split = c("Train", "Test"),
+  rows = c(nrow(train_data), nrow(test_data)),
+  hazardous_rate = c(
+    mean(train_data$hazardous == "Hazardous"),
+    mean(test_data$hazardous == "Hazardous")
+  )
+) %>%
+  mutate(hazardous_rate = format_percent(hazardous_rate)) %>%
+  kable(caption = "Stratified train/test split")
+```
+
+### Evaluation Functions
+
+```{r metric-functions}
+safe_divide <- function(numerator, denominator) {
+  ifelse(denominator == 0, NA_real_, numerator / denominator)
+}
+
+confusion_metrics <- function(actual, predicted, positive = "Hazardous") {
+  actual <- as.character(actual)
+  predicted <- as.character(predicted)
+  negative <- "Not Hazardous"
+
+  tp <- sum(actual == positive & predicted == positive)
+  tn <- sum(actual == negative & predicted == negative)
+  fp <- sum(actual == negative & predicted == positive)
+  fn <- sum(actual == positive & predicted == negative)
+
+  tibble(
+    tp = tp,
+    tn = tn,
+    fp = fp,
+    fn = fn,
+    accuracy = safe_divide(tp + tn, tp + tn + fp + fn),
+    recall = safe_divide(tp, tp + fn),
+    specificity = safe_divide(tn, tn + fp),
+    precision = safe_divide(tp, tp + fp)
+  )
+}
+```
+
+### Fit Classification Tree
+
+```{r fit-models}
+full_formula <- as.formula(
+  paste("hazardous ~", paste(model_vars_full, collapse = " + "))
+)
+
+tree_full <- rpart(
+  full_formula,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.001, minbucket = 25)
+)
+
+tree_full_predicted <- predict(tree_full, newdata = test_data, type = "class")
+```
+
+## Results
+
+### Classification Tree Performance
+
+```{r model-comparison}
+model_metrics <- confusion_metrics(test_data$hazardous, tree_full_predicted) %>%
+  select(
+    accuracy,
+    recall,
+    specificity,
+    precision,
+    tp,
+    tn,
+    fp,
+    fn
+  )
+
+model_metrics %>%
+  mutate(
+    across(c(accuracy, recall, specificity, precision), ~ format_percent(.x))
+  ) %>%
+  select(
+    Accuracy = accuracy,
+    Recall = recall,
+    Specificity = specificity,
+    Precision = precision,
+    `True Positives` = tp,
+    `True Negatives` = tn,
+    `False Positives` = fp,
+    `False Negatives` = fn
+  ) %>%
+  kable(caption = "Classification tree performance on the test data")
+```
+
+The tree has high overall accuracy, but recall and precision are more important because
+the hazardous class is small. The confusion matrix below shows how many hazardous
+asteroids the model catches and misses.
+
+### Confusion Matrix Heatmap
+
+```{r confusion-heatmap}
+confusion_df <- tibble(
+  actual = test_data$hazardous,
+  predicted = tree_full_predicted
+) %>%
+  count(actual, predicted) %>%
+  complete(
+    actual = levels(test_data$hazardous),
+    predicted = levels(test_data$hazardous),
+    fill = list(n = 0)
+  )
+
+ggplot(confusion_df, aes(x = predicted, y = actual, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), color = "white", fontface = "bold") +
+  scale_fill_gradient(low = "#C6DBEF", high = class_colors[["Not Hazardous"]]) +
+  labs(
+    title = "Confusion Matrix: Classification Tree",
+    x = "Predicted Class",
+    y = "Actual Class",
+    fill = "Count"
+  ) +
+  theme_minimal()
+```
+
+### Classification Tree Variable Importance
+
+```{r model-variable-importance}
+importance_df <- tibble(
+  variable = names(tree_full$variable.importance),
+  importance = as.numeric(tree_full$variable.importance)
+) %>%
+  mutate(variable = recode(variable, !!!feature_labels)) %>%
+  arrange(desc(importance))
+
+importance_df %>%
+  mutate(importance = round(importance, 1)) %>%
+  kable(caption = "Most important variables in the full classification tree")
+
+ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = accent_color) +
+  coord_flip() +
+  labs(
+    title = "Variable Importance from Full Classification Tree",
+    x = NULL,
+    y = "Importance"
+  ) +
+  theme_minimal()
+```
+
+The model results reinforce the visual findings: size and brightness are central to the
+hazardous label, while the other orbital and close-approach variables provide weaker
+separation. The model is useful as an explanatory check, but it should not be interpreted
+as a real-world asteroid warning system.
+
+## Conclusion
+
+The strongest pattern in the data is that NASA's hazardous label is closely tied to
+asteroid size and brightness. Hazardous asteroids are rare in the cleaned dataset, so
+accuracy alone is misleading. The classification tree helps summarize which variables
+matter most, but the model should be interpreted as an explanatory check rather than a
+real-world warning system.
+
+Future work should add Earth MOID, the official orbital-distance part of the PHA
+definition, and should compare multiple close approaches for the same asteroid rather
+than relying on one summarized approach field. It would also be useful to test whether
+one of diameter or absolute magnitude can be dropped without losing much predictive
+performance.
