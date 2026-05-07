@@ -83,14 +83,40 @@ Two groups of missing values stand out:
   meaningfully to modeling and will be removed.
 - A small number of rows (4–13) are missing diameter and orbital columns. These will also
   be dropped since imputing physical measurements for asteroids is not reliable.
+- The `name` column has a few missing values, but it is an identifier field rather than
+  an analysis variable, so it is not used to decide which rows to keep.
 
 ```{r drop-missing}
-neo_clean <- neo_raw %>%
-  drop_na()
+required_analysis_cols <- c(
+  "neo_reference_id",
+  "absolute_magnitude_h",
+  "est_diam_min_km",
+  "est_diam_max_km",
+  "miss_distance_km",
+  "relative_velocity_km_s",
+  "orbital_eccentricity",
+  "orbital_inclination",
+  "orbital_semi_major_axis",
+  "is_potentially_hazardous_asteroid"
+)
 
-# Confirm no remaining missing values
-colSums(is.na(neo_clean))
+neo_clean <- neo_raw %>%
+  drop_na(all_of(required_analysis_cols))
+
+# Confirm no remaining missing values in analysis columns
+colSums(is.na(select(neo_clean, all_of(required_analysis_cols))))
 nrow(neo_clean)
+
+tibble(
+  dataset = c("Raw data", "Cleaned data"),
+  rows = c(nrow(neo_raw), nrow(neo_clean)),
+  hazardous_rate = c(
+    mean(neo_raw$is_potentially_hazardous_asteroid),
+    mean(neo_clean$is_potentially_hazardous_asteroid)
+  )
+) %>%
+  mutate(hazardous_rate = format_percent(hazardous_rate)) %>%
+  kable(caption = "Class balance before and after missing-value filtering")
 ```
 
 ### Step 2: Engineer a Mean Diameter Variable
@@ -485,8 +511,12 @@ very small asteroids are rarely labeled hazardous, while larger objects are much
 likely to be flagged. To keep the evaluation honest, the data is split into stratified
 training and test sets before fitting the models.
 
-The model uses the main orbital, close-approach, size, and brightness predictors from
-the exploratory analysis.
+There is an important interpretation limit: NASA's potentially hazardous asteroid label
+is partly tied to object size and brightness. Since estimated diameter and absolute
+magnitude are also closely related to each other, a model using those fields is partly
+recovering the structure of the label rather than discovering a fully independent warning
+rule. The full model is therefore best read as an explanatory model for this dataset, not
+as an independent asteroid warning system.
 
 ```{r train-test-split}
 model_vars_full <- c(
@@ -612,9 +642,11 @@ model_metrics %>%
   kable(caption = "Classification tree performance on the test data")
 ```
 
-The tree has high overall accuracy, but recall and precision are more important because
-the hazardous class is small. The confusion matrix below shows how many hazardous
-asteroids the model catches and misses.
+The full tree has high specificity, meaning it is good at recognizing non-hazardous
+asteroids, but recall is the key limitation. Because the hazardous class is small,
+accuracy can look strong even when many hazardous asteroids are missed. This is why the
+confusion matrix below is important: it shows how many hazardous asteroids the model
+catches and misses.
 
 ### Confusion Matrix Heatmap
 
@@ -670,16 +702,18 @@ ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
 
 The model results reinforce the visual findings: size and brightness are central to the
 hazardous label, while the other orbital and close-approach variables provide weaker
-separation. The model is useful as an explanatory check, but it should not be interpreted
-as a real-world asteroid warning system.
+separation. The full tree is useful as an explanatory check, but its low recall means it
+should not be interpreted as a real-world asteroid warning system.
 
 ## Conclusion
 
 The strongest pattern in the data is that NASA's hazardous label is closely tied to
-asteroid size and brightness. Hazardous asteroids are rare in the cleaned dataset, so
-accuracy alone is misleading. The classification tree helps summarize which variables
-matter most, but the model should be interpreted as an explanatory check rather than a
-real-world warning system.
+asteroid size and brightness. This is useful for explaining the dataset, but it also
+means the strongest predictors are not fully independent of the label definition.
+Hazardous asteroids are rare in the cleaned dataset, so accuracy alone is misleading:
+the full tree is much better at ruling out non-hazardous asteroids than at catching all
+hazardous asteroids. The classification tree should therefore be interpreted as an
+explanatory check rather than a real-world warning system.
 
 Future work should add Earth MOID, the official orbital-distance part of the PHA
 definition, and should compare multiple close approaches for the same asteroid rather
