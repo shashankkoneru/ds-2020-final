@@ -13,7 +13,11 @@ Hazardous Asteroids (PHAs)**, objects large enough and close enough to
 Earth’s orbit that a future impact cannot be completely ruled out.
 Understanding what distinguishes a hazardous NEO from a non-hazardous
 one is both scientifically interesting and practically important for
-planetary defense planning.
+planetary defense planning. The official definition matters for this
+project: [NASA CNEOS](https://cneos.jpl.nasa.gov/about/neo_groups.html)
+defines PHAs as asteroids with Earth MOID \<= 0.05 au and absolute
+magnitude H \<= 22.0, so size, brightness, and orbital-distance measures
+are directly tied to the label.
 
 This report investigates a dataset of 42,919 NEOs sourced from NASA’s
 NeoWs (Near Earth Object Web Service) API. We explore which physical and
@@ -76,7 +80,7 @@ the response is deeply nested JSON, each page was parsed manually using
 approach data, and orbital fields into a flat tibble. After all pages
 were collected and row-bound, the result was exported to
 `neo_full_dataset.xlsx` using `openxlsx`. The full extraction script is
-available in `DS2020_Final_Data_Extraction.Rmd` in this repository.
+available in `DS2020 Final Data Extraction.Rmd` in this repository.
 
 The `.xlsx` file is loaded here for analysis using `readxl`. No API
 calls are made during knitting, so the report is fully reproducible from
@@ -164,7 +168,7 @@ colSums(is.na(neo_raw))
     ## is_potentially_hazardous_asteroid 
     ##                                 0
 
-Two groups of missing values stand out:
+Three missing-value observations stand out:
 
 - **1,762 rows** are missing both `miss_distance_km` and
   `relative_velocity_km_s`. These are two of our most important
@@ -451,40 +455,6 @@ underlying physical property (size) from different angles. This
 multicollinearity means the model may attribute importance to one or the
 other somewhat arbitrarily; we treat them as overlapping evidence rather
 than independent signals.
-
-### Variable Importance (Classification Tree)
-
-``` r
-tree_fit <- rpart(
-  hazardous ~ diam_avg_km + relative_velocity_km_s + miss_distance_km +
-    absolute_magnitude_h + orbital_eccentricity + orbital_inclination +
-    orbital_semi_major_axis,
-  data = neo_clean,
-  method = "class"
-)
-
-importance_df <- tibble(
-  variable = names(tree_fit$variable.importance),
-  importance = as.numeric(tree_fit$variable.importance)
-) %>%
-  arrange(desc(importance))
-
-ggplot(importance_df, aes(x = reorder(variable, importance), y = importance)) +
-  geom_col(fill = "#1B9E77") +
-  coord_flip() +
-  labs(
-    title = "Variable Importance from Classification Tree",
-    x = NULL,
-    y = "Importance"
-  ) +
-  theme_minimal()
-```
-
-![](README_files/figure-gfm/variable-importance-1.png)<!-- -->
-
-This first tree is an exploratory check rather than the final model
-evaluation. A proper held-out train/test comparison appears after the
-remaining research-question plots.
 
 > **Note on exploration:** We initially explored scatter plots of raw
 > velocity and miss distance before realizing the overlap between
@@ -959,8 +929,8 @@ confusion_df <- tibble(
 
 ggplot(confusion_df, aes(x = predicted, y = actual, fill = n)) +
   geom_tile(color = "white") +
-  geom_text(aes(label = n), color = "white", fontface = "bold") +
-  scale_fill_gradient(low = "#C6DBEF", high = class_colors[["Not Hazardous"]]) +
+  geom_text(aes(label = n), color = "black", fontface = "bold") +
+  scale_fill_gradient(low = "#F7F7F7", high = "#9E9E9E") +
   labs(
     title = "Confusion Matrix: Classification Tree",
     x = "Predicted Class",
@@ -1004,13 +974,13 @@ bind_rows(tree_metrics, logit_metrics) %>%
 
 Classification tree vs. logistic regression on the same test set
 
-Both models show similar patterns: high specificity, moderate-to-low
-recall, and accuracy figures that are partly inflated by the class
-imbalance. The close agreement between the two very different model
-types strengthens confidence that the findings reflect genuine structure
-in the data rather than a quirk of the decision tree algorithm. Where
-the models disagree, the difference is small and consistent with
-sampling variation on the minority class.
+Both models show high specificity and weak hazardous-class recall,
+confirming that non-hazardous asteroids are much easier to identify than
+hazardous ones in this dataset. The classification tree has materially
+better recall than logistic regression, so it remains the main model.
+Logistic regression still serves as a useful robustness check: the
+accuracy problem and minority-class recall limitation are not artifacts
+of the tree alone.
 
 ### Classification Tree Variable Importance
 
@@ -1112,8 +1082,9 @@ Several directions would strengthen this analysis:
   currently in the dataset
 - **Address class imbalance** through oversampling (SMOTE) or
   cost-sensitive learning to improve recall on hazardous objects
-- **Compare model types**: logistic regression and random forests would
-  provide useful benchmarks against the classification tree
+- **Compare additional model types**: random forests, boosted trees, and
+  calibrated probability models would provide useful benchmarks against
+  the classification tree
 - **Track the same asteroid over multiple close approaches** rather than
   treating each approach record independently, which could introduce
   subtle data leakage
